@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 from playwright.async_api import async_playwright, Browser, Page
 
 from config import settings
-from .base import BaseScraper, JobListing
+from .base_scraper import BaseScraper, JobListing
 
 logger = logging.getLogger("job_app_bot.scrapers.linkedin")
 

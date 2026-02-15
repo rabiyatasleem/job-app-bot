@@ -15,29 +15,33 @@ A Python-powered CLI tool that automates the job application pipeline — from s
 
 ```
 job-app-bot/
-├── main.py                            # CLI entry point
 ├── requirements.txt
 ├── .env.example
 ├── config/
 │   └── settings.py                    # Pydantic settings from .env
 ├── src/
+│   ├── main.py                        # CLI entry point
 │   ├── scrapers/
-│   │   ├── base.py                    # BaseScraper ABC + JobListing dataclass
-│   │   ├── linkedin.py                # Playwright-based LinkedIn scraper
-│   │   └── indeed.py                  # httpx + BeautifulSoup Indeed scraper
+│   │   ├── base_scraper.py            # BaseScraper ABC + JobListing dataclass
+│   │   ├── linkedin_scraper.py        # Playwright-based LinkedIn scraper
+│   │   └── indeed_scraper.py          # httpx + BeautifulSoup Indeed scraper
 │   ├── ai/
 │   │   ├── resume_customizer.py       # Anthropic-powered resume tailoring
 │   │   └── cover_letter_generator.py  # Anthropic-powered cover letters
 │   ├── automation/
-│   │   └── form_filler.py             # Playwright form filling
+│   │   ├── form_filler.py             # Playwright form filling
+│   │   └── application_submitter.py   # End-to-end submission orchestrator
 │   ├── database/
 │   │   ├── models.py                  # SQLAlchemy models
-│   │   └── repository.py             # CRUD operations
+│   │   └── db.py                      # CRUD operations
 │   ├── profiles/
 │   │   └── manager.py                 # JSON profile storage
 │   └── utils/
 │       ├── logging.py                 # Centralized logger
 │       └── file_export.py             # Export to .docx / .txt
+├── data/
+│   ├── user_resume.pdf                # Your base resume (add your own)
+│   └── applications.db                # SQLite DB (created at runtime)
 └── tests/
     ├── conftest.py                    # Shared fixtures and HTML samples
     ├── test_indeed_scraper.py         # 30 tests
@@ -91,17 +95,17 @@ Create `config/profiles/default.json`:
 
 ```bash
 # Search all boards
-python main.py search -q "Software Engineer" -l "Remote"
+python src/main.py search -q "Software Engineer" -l "Remote"
 
 # Search specific board with filters
-python main.py search -q "Data Analyst" -l "New York, NY" -s indeed
+python src/main.py search -q "Data Analyst" -l "New York, NY" -s indeed
 ```
 
 ### Tailor resume and generate cover letter
 
 ```bash
 # Generate tailored documents for a specific job posting
-python main.py tailor -j 1 -p default
+python src/main.py tailor -j 1 -p default
 ```
 
 This creates a `output/<company>_<id>/` folder with `resume.docx` and `cover_letter.docx`.
@@ -110,16 +114,16 @@ This creates a `output/<company>_<id>/` folder with `resume.docx` and `cover_let
 
 ```bash
 # View all applications
-python main.py status
+python src/main.py status
 
 # Filter by status
-python main.py status -s applied
+python src/main.py status -s applied
 ```
 
 ### View your profile
 
 ```bash
-python main.py profile
+python src/main.py profile
 ```
 
 ## Running Tests

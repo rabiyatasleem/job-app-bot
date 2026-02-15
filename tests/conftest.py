@@ -7,7 +7,7 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
 import pytest
 
-from src.scrapers.base import JobListing
+from src.scrapers.base_scraper import JobListing
 
 
 # ---------------------------------------------------------------------------

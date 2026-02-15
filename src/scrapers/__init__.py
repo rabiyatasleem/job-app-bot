@@ -1,7 +1,7 @@
 """Job board scrapers package."""
 
-from .linkedin import LinkedInScraper
-from .indeed import IndeedScraper
-from .base import BaseScraper
+from .linkedin_scraper import LinkedInScraper
+from .indeed_scraper import IndeedScraper
+from .base_scraper import BaseScraper
 
 __all__ = ["BaseScraper", "LinkedInScraper", "IndeedScraper"]

@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from src.scrapers.linkedin import LinkedInScraper
+from src.scrapers.linkedin_scraper import LinkedInScraper
 from tests.conftest import LINKEDIN_DETAIL_PAGE_FIELDS
 
 
@@ -375,7 +375,7 @@ class TestSearch:
         self.scraper = LinkedInScraper()
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.linkedin.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.linkedin_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_returns_parsed_cards(self, mock_sleep):
         card1 = _make_card_locator(title="Job A", href="/jobs/view/1/", company="Co1")
         card2 = _make_card_locator(title="Job B", href="/jobs/view/2/", company="Co2")
@@ -405,7 +405,7 @@ class TestSearch:
         self.scraper._pw = MagicMock()
         self.scraper._browser = MagicMock()
 
-        with patch("src.scrapers.linkedin.settings") as mock_settings:
+        with patch("src.scrapers.linkedin_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Engineer", "Remote")
@@ -415,7 +415,7 @@ class TestSearch:
         assert listings[1].title == "Job B"
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.linkedin.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.linkedin_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_stops_when_no_cards(self, mock_sleep):
         page = AsyncMock()
         page.goto = AsyncMock()
@@ -426,7 +426,7 @@ class TestSearch:
         self.scraper._pw = MagicMock()
         self.scraper._browser = MagicMock()
 
-        with patch("src.scrapers.linkedin.settings") as mock_settings:
+        with patch("src.scrapers.linkedin_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 3
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Ghost", "Nowhere")
@@ -436,7 +436,7 @@ class TestSearch:
         assert page.goto.call_count == 1
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.linkedin.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.linkedin_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_skips_unparseable_cards(self, mock_sleep):
         good_card = _make_card_locator(title="Good Job", href="/jobs/view/1/")
         bad_card = AsyncMock()
@@ -465,7 +465,7 @@ class TestSearch:
         self.scraper._pw = MagicMock()
         self.scraper._browser = MagicMock()
 
-        with patch("src.scrapers.linkedin.settings") as mock_settings:
+        with patch("src.scrapers.linkedin_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Mixed", "NYC")
@@ -518,7 +518,7 @@ class TestLogin:
         page = AsyncMock()
 
         with patch.object(scraper, "_ensure_browser", return_value=page):
-            with patch("src.scrapers.linkedin.settings") as mock_settings:
+            with patch("src.scrapers.linkedin_scraper.settings") as mock_settings:
                 mock_settings.linkedin_email = "user@test.com"
                 mock_settings.linkedin_password = "secret123"
                 await scraper.login()

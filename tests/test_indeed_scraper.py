@@ -7,7 +7,7 @@ import httpx
 import pytest
 from bs4 import BeautifulSoup
 
-from src.scrapers.indeed import IndeedScraper
+from src.scrapers.indeed_scraper import IndeedScraper
 from tests.conftest import (
     INDEED_CARD_ABSOLUTE_URL,
     INDEED_CARD_DATA_JK_FALLBACK,
@@ -271,13 +271,13 @@ class TestSearch:
         self.scraper = IndeedScraper()
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.indeed.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_returns_listings(self, mock_sleep):
         mock_resp = _make_response(INDEED_SEARCH_PAGE)
         self.scraper._client = AsyncMock()
         self.scraper._client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.scrapers.indeed.settings") as mock_settings:
+        with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Engineer", "Remote")
@@ -288,13 +288,13 @@ class TestSearch:
         assert listings[1].title == "Frontend Engineer"
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.indeed.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_stops_on_empty_page(self, mock_sleep):
         mock_resp = _make_response(INDEED_SEARCH_PAGE_EMPTY)
         self.scraper._client = AsyncMock()
         self.scraper._client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.scrapers.indeed.settings") as mock_settings:
+        with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 5
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Ghost Job", "Nowhere")
@@ -304,13 +304,13 @@ class TestSearch:
         assert self.scraper._client.get.call_count == 1
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.indeed.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_deduplicates_by_url(self, mock_sleep):
         mock_resp = _make_response(INDEED_SEARCH_PAGE_DUPLICATE)
         self.scraper._client = AsyncMock()
         self.scraper._client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.scrapers.indeed.settings") as mock_settings:
+        with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Engineer", "Remote")
@@ -319,7 +319,7 @@ class TestSearch:
         assert len(listings) == 1
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.indeed.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_paginates(self, mock_sleep):
         page1 = _make_response(INDEED_SEARCH_PAGE)
         page2 = _make_response(INDEED_SEARCH_PAGE_EMPTY)
@@ -327,7 +327,7 @@ class TestSearch:
         self.scraper._client = AsyncMock()
         self.scraper._client.get = AsyncMock(side_effect=[page1, page2])
 
-        with patch("src.scrapers.indeed.settings") as mock_settings:
+        with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 3
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("Engineer", "Remote")
@@ -337,14 +337,14 @@ class TestSearch:
         assert self.scraper._client.get.call_count == 2
 
     @pytest.mark.asyncio
-    @patch("src.scrapers.indeed.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_alt_layout_selector(self, mock_sleep):
         """Indeed sometimes uses div[data-jk] instead of div.job_seen_beacon."""
         mock_resp = _make_response(INDEED_SEARCH_PAGE_ALT_LAYOUT)
         self.scraper._client = AsyncMock()
         self.scraper._client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.scrapers.indeed.settings") as mock_settings:
+        with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
             mock_settings.scrape_delay_seconds = 0
             listings = await self.scraper.search("ML", "Boston")
