@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import random
 import re
+from typing import Callable, TypeVar
 from urllib.parse import urljoin
 
 import httpx
@@ -12,6 +14,8 @@ from config import settings
 from .base_scraper import BaseScraper, JobListing
 
 logger = logging.getLogger("job_app_bot.scrapers.indeed")
+
+T = TypeVar("T")
 
 # Indeed filter param values
 _JOB_TYPES = {
@@ -57,6 +61,49 @@ class IndeedScraper(BaseScraper):
             follow_redirects=True,
             timeout=30.0,
         )
+
+    async def _retry(self, fn: Callable[..., T], *args, retries: int = 3, **kwargs) -> T:
+        """Retry an async callable with exponential backoff.
+
+        Args:
+            fn: Async function to call.
+            *args: Positional arguments for fn.
+            retries: Maximum number of attempts.
+            **kwargs: Keyword arguments for fn.
+
+        Returns:
+            Result of the async callable.
+
+        Raises:
+            The last exception if all retries are exhausted.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(retries):
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                wait = 2 ** attempt + random.uniform(0, 1)
+                logger.warning(
+                    "Attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    attempt + 1, retries, exc, wait,
+                )
+                await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
+    async def _fetch_page(self, url: str, **kwargs) -> httpx.Response:
+        """Fetch a page with raise_for_status.
+
+        Args:
+            url: URL to fetch.
+            **kwargs: Additional arguments for httpx.get.
+
+        Returns:
+            httpx.Response object.
+        """
+        resp = await self._client.get(url, **kwargs)
+        resp.raise_for_status()
+        return resp
 
     def _build_search_params(
         self, query: str, location: str, start: int = 0, **filters
@@ -115,8 +162,9 @@ class IndeedScraper(BaseScraper):
             params = self._build_search_params(
                 query, location, start=page_num * 10, **filters
             )
-            resp = await self._client.get(f"{self.BASE_URL}/jobs", params=params)
-            resp.raise_for_status()
+            resp = await self._retry(
+                self._fetch_page, f"{self.BASE_URL}/jobs", params=params
+            )
 
             soup = BeautifulSoup(resp.text, "lxml")
 
@@ -144,8 +192,21 @@ class IndeedScraper(BaseScraper):
             if page_count == 0:
                 break
 
-            await asyncio.sleep(settings.scrape_delay_seconds)
+            await asyncio.sleep(random.uniform(2.0, 5.0))
 
+        # Fetch full descriptions for each listing
+        for listing in listings:
+            if listing.url:
+                try:
+                    details = await self._retry(self.get_job_details, listing.url)
+                    listing.description = details.description
+                    listing.salary = details.salary or listing.salary
+                    listing.job_type = details.job_type or listing.job_type
+                except Exception as exc:
+                    logger.warning("Failed to fetch details for %s: %s", listing.url, exc)
+                await asyncio.sleep(random.uniform(2.0, 5.0))
+
+        logger.info("Search complete: %d total listings collected.", len(listings))
         return listings
 
     def _parse_card(self, card: Tag) -> JobListing | None:
@@ -261,8 +322,7 @@ class IndeedScraper(BaseScraper):
         Returns:
             JobListing with the complete description populated.
         """
-        resp = await self._client.get(url)
-        resp.raise_for_status()
+        resp = await self._retry(self._fetch_page, url)
         soup = BeautifulSoup(resp.text, "lxml")
 
         # --- Title ---
@@ -328,6 +388,64 @@ class IndeedScraper(BaseScraper):
             source="indeed",
         )
 
+    def save_to_database(self, listings: list[JobListing]) -> int:
+        """Save job listings to the database.
+
+        Args:
+            listings: List of JobListing objects to persist.
+
+        Returns:
+            Number of listings saved.
+        """
+        from src.database.db import ApplicationRepository
+
+        repo = ApplicationRepository()
+        repo.create_tables()
+        saved = 0
+        for listing in listings:
+            try:
+                repo.save_job_posting(
+                    title=listing.title,
+                    company=listing.company,
+                    location=listing.location,
+                    url=listing.url,
+                    description=listing.description,
+                    salary=listing.salary,
+                    job_type=listing.job_type,
+                    source=listing.source,
+                )
+                saved += 1
+            except Exception as exc:
+                logger.warning("Failed to save listing %s: %s", listing.url, exc)
+        repo.close()
+        logger.info("Saved %d/%d listings to database.", saved, len(listings))
+        return saved
+
     async def close(self) -> None:
         """Close the HTTP client."""
-        await self._client.aclose()
+        try:
+            await self._client.aclose()
+        except Exception as exc:
+            logger.debug("Error during cleanup: %s", exc)
+
+
+async def main() -> None:
+    """Standalone test: search Indeed and save results."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    scraper = IndeedScraper()
+    try:
+        listings = await scraper.search("Python Developer", "Remote")
+        logger.info("Found %d listings.", len(listings))
+
+        for listing in listings[:5]:
+            print(f"  {listing.title} @ {listing.company} — {listing.location}")
+
+        saved = scraper.save_to_database(listings)
+        print(f"\nSaved {saved} listings to database.")
+    finally:
+        await scraper.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

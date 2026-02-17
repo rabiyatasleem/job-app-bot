@@ -248,7 +248,8 @@ class TestGetJobDetails:
         assert listing.location == "Seattle, WA"
 
     @pytest.mark.asyncio
-    async def test_http_error_raised(self):
+    @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
+    async def test_http_error_raised(self, mock_sleep):
         error_resp = httpx.Response(
             status_code=404,
             request=httpx.Request("GET", "https://www.indeed.com/viewjob?jk=bad"),
@@ -273,9 +274,12 @@ class TestSearch:
     @pytest.mark.asyncio
     @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_returns_listings(self, mock_sleep):
-        mock_resp = _make_response(INDEED_SEARCH_PAGE)
+        search_resp = _make_response(INDEED_SEARCH_PAGE)
+        detail_resp = _make_response(INDEED_DETAIL_PAGE)
         self.scraper._client = AsyncMock()
-        self.scraper._client.get = AsyncMock(return_value=mock_resp)
+        self.scraper._client.get = AsyncMock(
+            side_effect=[search_resp, detail_resp, detail_resp]
+        )
 
         with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
@@ -306,9 +310,12 @@ class TestSearch:
     @pytest.mark.asyncio
     @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_deduplicates_by_url(self, mock_sleep):
-        mock_resp = _make_response(INDEED_SEARCH_PAGE_DUPLICATE)
+        search_resp = _make_response(INDEED_SEARCH_PAGE_DUPLICATE)
+        detail_resp = _make_response(INDEED_DETAIL_PAGE)
         self.scraper._client = AsyncMock()
-        self.scraper._client.get = AsyncMock(return_value=mock_resp)
+        self.scraper._client.get = AsyncMock(
+            side_effect=[search_resp, detail_resp]
+        )
 
         with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1
@@ -323,9 +330,13 @@ class TestSearch:
     async def test_search_paginates(self, mock_sleep):
         page1 = _make_response(INDEED_SEARCH_PAGE)
         page2 = _make_response(INDEED_SEARCH_PAGE_EMPTY)
+        detail_resp = _make_response(INDEED_DETAIL_PAGE)
 
         self.scraper._client = AsyncMock()
-        self.scraper._client.get = AsyncMock(side_effect=[page1, page2])
+        # page1 search, page2 search (empty), then 2 detail fetches
+        self.scraper._client.get = AsyncMock(
+            side_effect=[page1, page2, detail_resp, detail_resp]
+        )
 
         with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 3
@@ -333,16 +344,19 @@ class TestSearch:
             listings = await self.scraper.search("Engineer", "Remote")
 
         assert len(listings) == 2
-        # Page 1 had results (1 call), then delay + page 2 was empty (2nd call)
-        assert self.scraper._client.get.call_count == 2
+        # Page 1 search + page 2 search (empty) + 2 detail fetches = 4 calls
+        assert self.scraper._client.get.call_count == 4
 
     @pytest.mark.asyncio
     @patch("src.scrapers.indeed_scraper.asyncio.sleep", new_callable=AsyncMock)
     async def test_search_alt_layout_selector(self, mock_sleep):
         """Indeed sometimes uses div[data-jk] instead of div.job_seen_beacon."""
-        mock_resp = _make_response(INDEED_SEARCH_PAGE_ALT_LAYOUT)
+        search_resp = _make_response(INDEED_SEARCH_PAGE_ALT_LAYOUT)
+        detail_resp = _make_response(INDEED_DETAIL_PAGE)
         self.scraper._client = AsyncMock()
-        self.scraper._client.get = AsyncMock(return_value=mock_resp)
+        self.scraper._client.get = AsyncMock(
+            side_effect=[search_resp, detail_resp]
+        )
 
         with patch("src.scrapers.indeed_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1

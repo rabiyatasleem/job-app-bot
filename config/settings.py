@@ -4,7 +4,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    anthropic_api_key: str
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
     database_url: str = "sqlite:///data/applications.db"
 
     linkedin_email: str = ""
@@ -15,6 +16,9 @@ class Settings(BaseSettings):
     # Anthropic model config
     model_name: str = "claude-sonnet-4-5-20250929"
     max_tokens: int = 4096
+
+    # Gemini model config
+    gemini_model: str = "gemini-1.5-flash"
 
     # Scraping config
     scrape_delay_seconds: float = 2.0
