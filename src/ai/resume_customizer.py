@@ -1,8 +1,19 @@
 """AI-powered resume customization using the Anthropic API."""
 
+import asyncio
+import logging
+
 import anthropic
 
 from config import settings
+
+logger = logging.getLogger("job_app_bot.ai.resume_customizer")
+
+_CUSTOMIZE_SYSTEM_PROMPT = (
+    "You are an expert resume writer. Customize the given resume for the job "
+    "description while keeping all information truthful. Highlight relevant "
+    "experience and skills. Use ATS-friendly formatting."
+)
 
 
 class ResumeCustomizer:
@@ -82,3 +93,111 @@ class ResumeCustomizer:
             ],
         )
         return [line.strip() for line in message.content[0].text.splitlines() if line.strip()]
+
+
+async def customize_resume(
+    base_resume: str, job_description: str, *, retries: int = 3
+) -> str:
+    """Customize a resume for a job description using Claude.
+
+    Analyzes the job requirements and tailors the resume to highlight
+    relevant skills and experience. All information is kept truthful
+    and the output is optimized for ATS systems.
+
+    Args:
+        base_resume: The candidate's original resume text.
+        job_description: Full text of the target job posting.
+        retries: Number of retry attempts on API failure.
+
+    Returns:
+        Customized resume text.
+
+    Raises:
+        anthropic.APIError: If all retry attempts are exhausted.
+    """
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    user_content = (
+        f"## Base Resume\n\n{base_resume}\n\n"
+        f"## Job Description\n\n{job_description}\n\n"
+        "Customize this resume for the job description. "
+        "Keep all information truthful. Optimize formatting for ATS systems. "
+        "Return only the customized resume text."
+    )
+
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            logger.info("Calling Claude API (attempt %d/%d)...", attempt, retries)
+            message = await client.messages.create(
+                model=settings.model_name,
+                max_tokens=settings.max_tokens,
+                system=_CUSTOMIZE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            result = message.content[0].text
+            logger.info(
+                "Resume customized successfully (%d characters).", len(result)
+            )
+            return result
+        except anthropic.APIError as exc:
+            last_exc = exc
+            wait = 2 ** attempt
+            logger.warning(
+                "API call failed (attempt %d/%d): %s. Retrying in %ds...",
+                attempt, retries, exc, wait,
+            )
+            await asyncio.sleep(wait)
+
+    logger.error("All %d retry attempts exhausted.", retries)
+    raise last_exc  # type: ignore[misc]
+
+
+async def main() -> None:
+    """Example usage of customize_resume."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    base_resume = (
+        "John Doe\n"
+        "Software Engineer | john@example.com\n\n"
+        "EXPERIENCE\n"
+        "Senior Developer, Acme Corp (2020-Present)\n"
+        "- Built REST APIs using Python/FastAPI serving 1M+ requests/day\n"
+        "- Led migration from monolith to microservices architecture\n"
+        "- Implemented CI/CD pipelines with GitHub Actions\n"
+        "- Mentored 3 junior developers\n\n"
+        "Developer, StartupXYZ (2017-2020)\n"
+        "- Developed full-stack web apps with React and Django\n"
+        "- Managed PostgreSQL databases and Redis caching\n"
+        "- Wrote unit and integration tests (95% coverage)\n\n"
+        "SKILLS\n"
+        "Python, JavaScript, TypeScript, FastAPI, Django, React, PostgreSQL, "
+        "Redis, Docker, Kubernetes, AWS, CI/CD, Git\n\n"
+        "EDUCATION\n"
+        "B.S. Computer Science, State University (2017)"
+    )
+
+    job_description = (
+        "Senior Python Developer - Remote\n\n"
+        "We're looking for a Senior Python Developer to join our backend team.\n\n"
+        "Requirements:\n"
+        "- 5+ years Python experience\n"
+        "- Experience with FastAPI or Django\n"
+        "- Strong knowledge of PostgreSQL\n"
+        "- Experience with Docker and Kubernetes\n"
+        "- CI/CD pipeline experience\n"
+        "- Excellent communication skills\n\n"
+        "Nice to have:\n"
+        "- AWS experience\n"
+        "- Microservices architecture\n"
+        "- Team lead experience"
+    )
+
+    customized = await customize_resume(base_resume, job_description)
+    print("=" * 60)
+    print("CUSTOMIZED RESUME")
+    print("=" * 60)
+    print(customized)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
