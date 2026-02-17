@@ -2,14 +2,18 @@
 
 import asyncio
 import logging
+import random
+from typing import Callable, TypeVar
 from urllib.parse import urlencode
 
-from playwright.async_api import async_playwright, Browser, Page
+from playwright.async_api import async_playwright, Browser, Page, TimeoutError as PlaywrightTimeout
 
 from config import settings
 from .base_scraper import BaseScraper, JobListing
 
 logger = logging.getLogger("job_app_bot.scrapers.linkedin")
+
+T = TypeVar("T")
 
 # LinkedIn filter codes
 _EXPERIENCE_LEVELS = {
@@ -57,12 +61,54 @@ class LinkedInScraper(BaseScraper):
         self._page: Page | None = None
         self._pw = None
 
+    async def _retry(self, fn: Callable[..., T], *args, retries: int = 3, **kwargs) -> T:
+        """Retry an async callable with exponential backoff.
+
+        Args:
+            fn: Async function to call.
+            *args: Positional arguments for fn.
+            retries: Maximum number of attempts.
+            **kwargs: Keyword arguments for fn.
+
+        Returns:
+            Result of the async callable.
+
+        Raises:
+            The last exception if all retries are exhausted.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(retries):
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                wait = 2 ** attempt + random.uniform(0, 1)
+                logger.warning(
+                    "Attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    attempt + 1, retries, exc, wait,
+                )
+                await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
     async def _ensure_browser(self) -> Page:
         """Launch browser and return a page, reusing if already open."""
         if self._page is None:
-            self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(headless=True)
-            self._page = await self._browser.new_page()
+            try:
+                self._pw = await async_playwright().start()
+                self._browser = await self._pw.chromium.launch(headless=True)
+                self._page = await self._browser.new_page()
+            except Exception as exc:
+                logger.error("Failed to launch browser: %s", exc)
+                # Clean up partial state
+                if self._pw:
+                    try:
+                        await self._pw.stop()
+                    except Exception:
+                        pass
+                self._pw = None
+                self._browser = None
+                self._page = None
+                raise
         return self._page
 
     async def login(self) -> None:
@@ -72,7 +118,12 @@ class LinkedInScraper(BaseScraper):
         await page.fill("#username", settings.linkedin_email)
         await page.fill("#password", settings.linkedin_password)
         await page.click("[type=submit]")
-        await page.wait_for_url("**/feed/**", timeout=30_000)
+        try:
+            await page.wait_for_url("**/feed/**", timeout=30_000)
+        except PlaywrightTimeout:
+            raise TimeoutError(
+                "LinkedIn login timed out — check credentials or for a CAPTCHA challenge."
+            ) from None
 
     def _build_search_url(self, query: str, location: str, start: int = 0, **filters) -> str:
         """Build a LinkedIn jobs search URL with query params and filters.
@@ -116,14 +167,42 @@ class LinkedInScraper(BaseScraper):
         jobs_container = page.locator("div.jobs-search-results-list")
         for _ in range(3):
             await jobs_container.evaluate("el => el.scrollTop = el.scrollHeight")
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
 
-    async def search(self, query: str, location: str, **filters) -> list[JobListing]:
+    async def _fetch_page(self, page: Page, url: str) -> list[JobListing]:
+        """Navigate to a search results page and extract job cards.
+
+        Args:
+            page: Playwright Page instance.
+            url: Search results URL to navigate to.
+
+        Returns:
+            List of JobListing objects parsed from the page.
+        """
+        await page.goto(url, wait_until="domcontentloaded")
+
+        await page.wait_for_selector("div.job-card-container", timeout=10_000)
+
+        await self._scroll_job_list(page)
+
+        cards = await page.locator("div.job-card-container").all()
+        results: list[JobListing] = []
+        for card in cards:
+            listing = await self._parse_card(card)
+            if listing:
+                results.append(listing)
+        return results
+
+    async def search(
+        self, query: str, location: str, *, max_results: int = 0, **filters
+    ) -> list[JobListing]:
         """Search LinkedIn jobs with pagination.
 
         Args:
             query: Job title or keywords.
             location: City/state or 'remote'.
+            max_results: Stop after collecting this many listings. 0 means
+                use settings.max_pages_per_search pages.
             **filters: Optional filters — experience_level, job_type, work_mode,
                        time_posted.
 
@@ -132,34 +211,47 @@ class LinkedInScraper(BaseScraper):
         """
         page = await self._ensure_browser()
         listings: list[JobListing] = []
+        num_pages = settings.max_pages_per_search
 
-        for page_num in range(settings.max_pages_per_search):
+        for page_num in range(num_pages):
             url = self._build_search_url(query, location, start=page_num * 25, **filters)
-            await page.goto(url, wait_until="domcontentloaded")
 
-            # Wait for job cards to appear
             try:
-                await page.wait_for_selector(
-                    "div.job-card-container", timeout=10_000
-                )
-            except Exception:
-                logger.debug("No job cards found on page %d, stopping.", page_num)
+                page_listings = await self._retry(self._fetch_page, page, url)
+            except Exception as exc:
+                logger.warning("Page %d failed after retries: %s. Continuing.", page_num + 1, exc)
+                continue
+
+            if not page_listings:
+                logger.debug("No cards on page %d, stopping pagination.", page_num + 1)
                 break
 
-            await self._scroll_job_list(page)
+            listings.extend(page_listings)
+            logger.info(
+                "Page %d: collected %d cards (total: %d)",
+                page_num + 1, len(page_listings), len(listings),
+            )
 
-            cards = await page.locator("div.job-card-container").all()
-            if not cards:
+            if max_results and len(listings) >= max_results:
+                listings = listings[:max_results]
+                logger.info("Reached max_results=%d, stopping.", max_results)
                 break
 
-            for card in cards:
-                listing = await self._parse_card(card)
-                if listing:
-                    listings.append(listing)
+            await asyncio.sleep(random.uniform(2.0, 5.0))
 
-            logger.info("Page %d: collected %d cards", page_num + 1, len(cards))
-            await asyncio.sleep(settings.scrape_delay_seconds)
+        # Fetch full descriptions for each listing
+        for i, listing in enumerate(listings):
+            if listing.url:
+                try:
+                    details = await self._retry(self.get_job_details, listing.url)
+                    listing.description = details.description
+                    listing.salary = details.salary or listing.salary
+                    listing.job_type = details.job_type or listing.job_type
+                except Exception as exc:
+                    logger.warning("Failed to fetch details for %s: %s", listing.url, exc)
+                await asyncio.sleep(random.uniform(2.0, 5.0))
 
+        logger.info("Search complete: %d total listings collected.", len(listings))
         return listings
 
     async def _parse_card(self, card) -> JobListing | None:
@@ -216,10 +308,12 @@ class LinkedInScraper(BaseScraper):
         try:
             await page.wait_for_selector("div.jobs-description", timeout=10_000)
         except Exception:
-            # Fallback selector for different page layouts
-            await page.wait_for_selector(
-                "div.description__text, div.show-more-less-html", timeout=10_000
-            )
+            try:
+                await page.wait_for_selector(
+                    "div.description__text, div.show-more-less-html", timeout=10_000
+                )
+            except Exception:
+                logger.warning("No description selector matched for %s", url)
 
         # Title
         title = ""
@@ -292,12 +386,76 @@ class LinkedInScraper(BaseScraper):
             source="linkedin",
         )
 
+    def save_to_database(self, listings: list[JobListing]) -> int:
+        """Save job listings to the database.
+
+        Args:
+            listings: List of JobListing objects to persist.
+
+        Returns:
+            Number of listings saved.
+        """
+        from src.database.db import ApplicationRepository
+
+        repo = ApplicationRepository()
+        repo.create_tables()
+        saved = 0
+        for listing in listings:
+            try:
+                repo.save_job_posting(
+                    title=listing.title,
+                    company=listing.company,
+                    location=listing.location,
+                    url=listing.url,
+                    description=listing.description,
+                    salary=listing.salary,
+                    job_type=listing.job_type,
+                    source=listing.source,
+                )
+                saved += 1
+            except Exception as exc:
+                logger.warning("Failed to save listing %s: %s", listing.url, exc)
+        repo.close()
+        logger.info("Saved %d/%d listings to database.", saved, len(listings))
+        return saved
+
     async def close(self) -> None:
         """Close the browser and Playwright instance."""
-        if self._browser:
-            await self._browser.close()
+        try:
+            if self._browser:
+                await self._browser.close()
+                self._browser = None
+                self._page = None
+            if self._pw:
+                await self._pw.stop()
+                self._pw = None
+        except Exception as exc:
+            logger.debug("Error during cleanup: %s", exc)
             self._browser = None
             self._page = None
-        if self._pw:
-            await self._pw.stop()
             self._pw = None
+
+
+async def main() -> None:
+    """Standalone test: search LinkedIn and save results."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    scraper = LinkedInScraper()
+    try:
+        await scraper.login()
+        logger.info("Login successful.")
+
+        listings = await scraper.search("Python Developer", "Remote")
+        logger.info("Found %d listings.", len(listings))
+
+        for listing in listings[:5]:
+            print(f"  {listing.title} @ {listing.company} — {listing.location}")
+
+        saved = scraper.save_to_database(listings)
+        print(f"\nSaved {saved} listings to database.")
+    finally:
+        await scraper.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
