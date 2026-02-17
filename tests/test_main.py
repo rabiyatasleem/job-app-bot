@@ -15,9 +15,13 @@ from src.main import (
     MAX_APPLICATIONS_PER_RUN,
     APPLY_DELAY_MIN,
     APPLY_DELAY_MAX,
+    _RESUME_SYSTEM_PROMPT,
+    _COVER_LETTER_SYSTEM_PROMPT,
     _input,
     _confirm,
     _input_multiline,
+    _get_gemini_model,
+    _gemini_generate,
     build_parser,
     main,
     cmd_setup,
@@ -509,6 +513,508 @@ class TestInteractiveMenu:
     def test_menu_setup(self, mock_cmd, mock_input):
         interactive_menu()
         mock_cmd.assert_called_once()
+
+
+# ===================================================================
+# _get_gemini_model
+# ===================================================================
+
+class TestGetGeminiModel:
+
+    @patch("src.main.genai")
+    @patch("src.main.settings")
+    def test_configures_api_key(self, mock_settings, mock_genai):
+        mock_settings.gemini_api_key = "test-key-123"
+        mock_settings.gemini_model = "gemini-1.5-flash"
+        mock_genai.GenerativeModel.return_value = MagicMock()
+
+        _get_gemini_model()
+
+        mock_genai.configure.assert_called_once_with(api_key="test-key-123")
+
+    @patch("src.main.genai")
+    @patch("src.main.settings")
+    def test_returns_model_with_correct_name(self, mock_settings, mock_genai):
+        mock_settings.gemini_api_key = "key"
+        mock_settings.gemini_model = "gemini-1.5-flash"
+        mock_model = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        result = _get_gemini_model()
+
+        mock_genai.GenerativeModel.assert_called_once_with("gemini-1.5-flash")
+        assert result is mock_model
+
+    @patch("src.main.genai")
+    @patch("src.main.settings")
+    def test_uses_custom_model_name(self, mock_settings, mock_genai):
+        mock_settings.gemini_api_key = "key"
+        mock_settings.gemini_model = "gemini-2.0-pro"
+
+        _get_gemini_model()
+
+        mock_genai.GenerativeModel.assert_called_once_with("gemini-2.0-pro")
+
+
+# ===================================================================
+# _gemini_generate
+# ===================================================================
+
+class TestGeminiGenerate:
+
+    @pytest.mark.asyncio
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_returns_text_on_success(self, mock_sleep):
+        mock_model = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "Generated resume text"
+        mock_model.generate_content.return_value = mock_response
+
+        result = await _gemini_generate(mock_model, "test prompt")
+
+        assert result == "Generated resume text"
+        mock_model.generate_content.assert_called_once_with("test prompt")
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_retries_on_failure_then_succeeds(self, mock_sleep):
+        mock_model = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "Success on retry"
+        mock_model.generate_content.side_effect = [
+            Exception("API error"),
+            mock_response,
+        ]
+
+        result = await _gemini_generate(mock_model, "prompt")
+
+        assert result == "Success on retry"
+        assert mock_model.generate_content.call_count == 2
+        mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_raises_after_all_retries_exhausted(self, mock_sleep):
+        mock_model = MagicMock()
+        mock_model.generate_content.side_effect = Exception("persistent failure")
+
+        with pytest.raises(Exception, match="persistent failure"):
+            await _gemini_generate(mock_model, "prompt")
+
+        assert mock_model.generate_content.call_count == 3
+        assert mock_sleep.await_count == 3
+
+    @pytest.mark.asyncio
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_retries_twice_then_succeeds(self, mock_sleep):
+        mock_model = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "Third attempt"
+        mock_model.generate_content.side_effect = [
+            Exception("fail 1"),
+            Exception("fail 2"),
+            mock_response,
+        ]
+
+        result = await _gemini_generate(mock_model, "prompt")
+
+        assert result == "Third attempt"
+        assert mock_model.generate_content.call_count == 3
+        assert mock_sleep.await_count == 2
+
+    @pytest.mark.asyncio
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_passes_prompt_to_model(self, mock_sleep):
+        mock_model = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "ok"
+        mock_model.generate_content.return_value = mock_response
+
+        await _gemini_generate(mock_model, "Customize this resume for a Python role")
+
+        mock_model.generate_content.assert_called_once_with(
+            "Customize this resume for a Python role"
+        )
+
+
+# ===================================================================
+# cmd_apply — full Gemini workflow
+# ===================================================================
+
+class TestCmdApplyGeminiWorkflow:
+    """Tests for the apply command's Gemini-powered resume/cover letter flow."""
+
+    def _setup_apply_mocks(self, tmp_path, MockPM, MockRepo, mock_settings):
+        """Helper to wire up common mocks for cmd_apply tests."""
+        resume = tmp_path / "resume.txt"
+        resume.write_text("Base resume content")
+
+        mock_profile = MagicMock()
+        mock_profile.base_resume_path = str(resume)
+        mock_profile.full_name = "Test User"
+        MockPM.return_value.load.return_value = mock_profile
+
+        mock_settings.gemini_api_key = "test-key"
+        mock_settings.gemini_model = "gemini-1.5-flash"
+
+        mock_posting = MagicMock()
+        mock_posting.id = 1
+        mock_posting.title = "Python Developer"
+        mock_posting.company = "TestCorp"
+        mock_posting.url = "https://example.com/job/1"
+        mock_posting.description = "Build Python apps"
+
+        mock_app = MagicMock()
+        mock_app.id = 10
+
+        mock_repo = MockRepo.return_value
+        mock_repo.create_tables = MagicMock()
+        mock_repo._session = MagicMock()
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = [mock_posting]
+        mock_repo._session.scalars.return_value = mock_scalars
+        mock_repo.create_application.return_value = mock_app
+        mock_repo.update_application_status = MagicMock()
+        mock_repo.close = MagicMock()
+
+        return mock_profile, mock_posting, mock_app, mock_repo
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=True)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_calls_gemini_for_resume_and_cover_letter(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_model = MagicMock()
+        mock_get_model.return_value = mock_model
+        mock_generate.side_effect = ["Tailored resume text", "Cover letter text"]
+        mock_save_docx.return_value = tmp_path / "resume.docx"
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None  # Skip browser interaction
+        filler.submit = AsyncMock()
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        # Gemini should be called twice: once for resume, once for cover letter
+        assert mock_generate.await_count == 2
+        resume_call_prompt = mock_generate.call_args_list[0][0][1]
+        cover_call_prompt = mock_generate.call_args_list[1][0][1]
+        assert "Base resume content" in resume_call_prompt
+        assert "Build Python apps" in resume_call_prompt
+        assert "Base resume content" in cover_call_prompt
+        assert "TestCorp" in cover_call_prompt
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=True)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_submit_updates_status_to_applied(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = ["Resume", "Cover letter"]
+        mock_save_docx.return_value = tmp_path / "out.docx"
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None
+        filler.submit = AsyncMock()
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        # Should have updated status to "applied"
+        status_calls = [
+            c[0] for c in mock_repo.update_application_status.call_args_list
+        ]
+        assert (mock_app.id, "resume_tailored") in status_calls
+        assert (mock_app.id, "applied") in status_calls
+
+        output = capsys.readouterr().out
+        assert "Submitted!" in output
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=False)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_skip_updates_status_to_saved(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = ["Resume", "Cover letter"]
+        mock_save_docx.return_value = tmp_path / "out.docx"
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        # Should have updated status to "saved" (user skipped)
+        status_calls = [
+            c[0] for c in mock_repo.update_application_status.call_args_list
+        ]
+        assert (mock_app.id, "saved") in status_calls
+
+        output = capsys.readouterr().out
+        assert "Skipped" in output
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_gemini_failure_continues_to_next_job(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = Exception("Gemini API down")
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        output = capsys.readouterr().out
+        assert "Error" in output or "Gemini API down" in output
+        # Filler and repo should still be cleaned up
+        filler.close.assert_awaited_once()
+        mock_repo.close.assert_called_once()
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=True)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_saves_documents_as_docx(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = ["Custom resume markdown", "Dear Hiring Manager..."]
+        mock_save_docx.return_value = tmp_path / "out.docx"
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None
+        filler.submit = AsyncMock()
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        # save_as_docx called twice: resume + cover letter
+        assert mock_save_docx.call_count == 2
+        resume_call = mock_save_docx.call_args_list[0]
+        cover_call = mock_save_docx.call_args_list[1]
+        assert resume_call[0][0] == "Custom resume markdown"
+        assert "resume.docx" in resume_call[0][1]
+        assert cover_call[0][0] == "Dear Hiring Manager..."
+        assert "cover_letter.docx" in cover_call[0][1]
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=True)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.fill_application_form")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_fills_form_and_takes_screenshot(
+        self, MockPM, MockRepo, mock_settings, MockFillForm, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = ["Resume", "Cover letter"]
+        mock_save_docx.return_value = tmp_path / "out.docx"
+
+        mock_page = AsyncMock()
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = mock_page
+        filler.submit = AsyncMock()
+        filler.close = AsyncMock()
+
+        fill_result = MagicMock()
+        fill_result.fields_filled = 5
+        fill_result.fields_total = 8
+        fill_result.screenshot_path = "/tmp/screenshot.png"
+        fill_result.errors = []
+        MockFillForm.return_value = fill_result
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        # Should have navigated to job URL
+        mock_page.goto.assert_awaited_once_with(
+            posting.url, wait_until="domcontentloaded"
+        )
+        # Should have called fill_application_form
+        MockFillForm.assert_awaited_once()
+
+        output = capsys.readouterr().out
+        assert "5/8 fields" in output
+        assert "screenshot.png" in output
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=True)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_submit_failure_does_not_crash(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = ["Resume", "Cover letter"]
+        mock_save_docx.return_value = tmp_path / "out.docx"
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None
+        filler.submit = AsyncMock(side_effect=Exception("Browser crash"))
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        output = capsys.readouterr().out
+        assert "Submit failed" in output
+        # Should still complete and print summary
+        assert "Done!" in output
+
+    @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("src.main.save_as_docx")
+    @patch("src.main._confirm", return_value=True)
+    @patch("src.main._gemini_generate", new_callable=AsyncMock)
+    @patch("src.main._get_gemini_model")
+    @patch("src.main.FormFiller")
+    @patch("src.main.settings")
+    @patch("src.main.ApplicationRepository")
+    @patch("src.main.ProfileManager")
+    def test_apply_uses_resume_system_prompt(
+        self, MockPM, MockRepo, mock_settings, MockFiller,
+        mock_get_model, mock_generate, mock_confirm, mock_save_docx,
+        mock_sleep, capsys, tmp_path,
+    ):
+        mock_profile, posting, mock_app, mock_repo = self._setup_apply_mocks(
+            tmp_path, MockPM, MockRepo, mock_settings
+        )
+
+        mock_get_model.return_value = MagicMock()
+        mock_generate.side_effect = ["Resume", "Cover letter"]
+        mock_save_docx.return_value = tmp_path / "out.docx"
+
+        filler = MockFiller.return_value
+        filler.launch = AsyncMock()
+        filler._page = None
+        filler.submit = AsyncMock()
+        filler.close = AsyncMock()
+
+        args = argparse.Namespace(profile="default", max=5)
+        cmd_apply(args)
+
+        resume_prompt = mock_generate.call_args_list[0][0][1]
+        cover_prompt = mock_generate.call_args_list[1][0][1]
+        assert "expert resume writer" in resume_prompt
+        assert "expert career coach" in cover_prompt
+
+
+# ===================================================================
+# Prompt constants
+# ===================================================================
+
+class TestPromptConstants:
+
+    def test_resume_prompt_mentions_markdown(self):
+        assert "Markdown" in _RESUME_SYSTEM_PROMPT
+
+    def test_resume_prompt_mentions_truthful(self):
+        assert "truthful" in _RESUME_SYSTEM_PROMPT
+
+    def test_cover_letter_prompt_word_limit(self):
+        assert "400 words" in _COVER_LETTER_SYSTEM_PROMPT
+
+    def test_cover_letter_prompt_no_generic_opener(self):
+        assert "I am writing to apply" in _COVER_LETTER_SYSTEM_PROMPT
 
 
 # ===================================================================
