@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from src.scrapers.base_scraper import JobListing
 from src.scrapers.linkedin_scraper import LinkedInScraper
 from tests.conftest import LINKEDIN_DETAIL_PAGE_FIELDS
 
@@ -404,6 +405,9 @@ class TestSearch:
         self.scraper._page = page
         self.scraper._pw = MagicMock()
         self.scraper._browser = MagicMock()
+        self.scraper.get_job_details = AsyncMock(
+            return_value=JobListing(title="", company="", location="", url="", description="", source="linkedin")
+        )
 
         with patch("src.scrapers.linkedin_scraper.settings") as mock_settings:
             mock_settings.max_pages_per_search = 1

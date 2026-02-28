@@ -525,35 +525,33 @@ class TestGetGeminiModel:
     @patch("src.main.settings")
     def test_configures_api_key(self, mock_settings, mock_genai):
         mock_settings.gemini_api_key = "test-key-123"
-        mock_settings.gemini_model = "gemini-1.5-flash"
-        mock_genai.GenerativeModel.return_value = MagicMock()
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
 
         _get_gemini_model()
 
-        mock_genai.configure.assert_called_once_with(api_key="test-key-123")
+        mock_genai.Client.assert_called_once_with(api_key="test-key-123")
 
     @patch("src.main.genai")
     @patch("src.main.settings")
-    def test_returns_model_with_correct_name(self, mock_settings, mock_genai):
+    def test_returns_client(self, mock_settings, mock_genai):
         mock_settings.gemini_api_key = "key"
-        mock_settings.gemini_model = "gemini-1.5-flash"
-        mock_model = MagicMock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
 
         result = _get_gemini_model()
 
-        mock_genai.GenerativeModel.assert_called_once_with("gemini-1.5-flash")
-        assert result is mock_model
+        mock_genai.Client.assert_called_once_with(api_key="key")
+        assert result is mock_client
 
     @patch("src.main.genai")
     @patch("src.main.settings")
-    def test_uses_custom_model_name(self, mock_settings, mock_genai):
-        mock_settings.gemini_api_key = "key"
-        mock_settings.gemini_model = "gemini-2.0-pro"
+    def test_uses_configured_api_key(self, mock_settings, mock_genai):
+        mock_settings.gemini_api_key = "another-key-xyz"
 
         _get_gemini_model()
 
-        mock_genai.GenerativeModel.assert_called_once_with("gemini-2.0-pro")
+        mock_genai.Client.assert_called_once_with(api_key="another-key-xyz")
 
 
 # ===================================================================
@@ -564,77 +562,90 @@ class TestGeminiGenerate:
 
     @pytest.mark.asyncio
     @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_returns_text_on_success(self, mock_sleep):
-        mock_model = MagicMock()
+    @patch("src.main.settings")
+    async def test_returns_text_on_success(self, mock_settings, mock_sleep):
+        mock_settings.gemini_model = "gemini-2.0-flash"
+        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = "Generated resume text"
-        mock_model.generate_content.return_value = mock_response
+        mock_client.models.generate_content.return_value = mock_response
 
-        result = await _gemini_generate(mock_model, "test prompt")
+        result = await _gemini_generate(mock_client, "test prompt")
 
         assert result == "Generated resume text"
-        mock_model.generate_content.assert_called_once_with("test prompt")
+        mock_client.models.generate_content.assert_called_once_with(
+            model="gemini-2.0-flash", contents="test prompt"
+        )
         mock_sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retries_on_failure_then_succeeds(self, mock_sleep):
-        mock_model = MagicMock()
+    @patch("src.main.settings")
+    async def test_retries_on_failure_then_succeeds(self, mock_settings, mock_sleep):
+        mock_settings.gemini_model = "gemini-2.0-flash"
+        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = "Success on retry"
-        mock_model.generate_content.side_effect = [
+        mock_client.models.generate_content.side_effect = [
             Exception("API error"),
             mock_response,
         ]
 
-        result = await _gemini_generate(mock_model, "prompt")
+        result = await _gemini_generate(mock_client, "prompt")
 
         assert result == "Success on retry"
-        assert mock_model.generate_content.call_count == 2
+        assert mock_client.models.generate_content.call_count == 2
         mock_sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_raises_after_all_retries_exhausted(self, mock_sleep):
-        mock_model = MagicMock()
-        mock_model.generate_content.side_effect = Exception("persistent failure")
+    @patch("src.main.settings")
+    async def test_raises_after_all_retries_exhausted(self, mock_settings, mock_sleep):
+        mock_settings.gemini_model = "gemini-2.0-flash"
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = Exception("persistent failure")
 
         with pytest.raises(Exception, match="persistent failure"):
-            await _gemini_generate(mock_model, "prompt")
+            await _gemini_generate(mock_client, "prompt")
 
-        assert mock_model.generate_content.call_count == 3
+        assert mock_client.models.generate_content.call_count == 3
         assert mock_sleep.await_count == 3
 
     @pytest.mark.asyncio
     @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retries_twice_then_succeeds(self, mock_sleep):
-        mock_model = MagicMock()
+    @patch("src.main.settings")
+    async def test_retries_twice_then_succeeds(self, mock_settings, mock_sleep):
+        mock_settings.gemini_model = "gemini-2.0-flash"
+        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = "Third attempt"
-        mock_model.generate_content.side_effect = [
+        mock_client.models.generate_content.side_effect = [
             Exception("fail 1"),
             Exception("fail 2"),
             mock_response,
         ]
 
-        result = await _gemini_generate(mock_model, "prompt")
+        result = await _gemini_generate(mock_client, "prompt")
 
         assert result == "Third attempt"
-        assert mock_model.generate_content.call_count == 3
+        assert mock_client.models.generate_content.call_count == 3
         assert mock_sleep.await_count == 2
 
     @pytest.mark.asyncio
     @patch("src.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_passes_prompt_to_model(self, mock_sleep):
-        mock_model = MagicMock()
+    @patch("src.main.settings")
+    async def test_passes_prompt_to_model(self, mock_settings, mock_sleep):
+        mock_settings.gemini_model = "gemini-2.0-flash"
+        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = "ok"
-        mock_model.generate_content.return_value = mock_response
+        mock_client.models.generate_content.return_value = mock_response
 
-        await _gemini_generate(mock_model, "Customize this resume for a Python role")
+        await _gemini_generate(mock_client, "Customize this resume for a Python role")
 
-        mock_model.generate_content.assert_called_once_with(
-            "Customize this resume for a Python role"
+        mock_client.models.generate_content.assert_called_once_with(
+            model="gemini-2.0-flash",
+            contents="Customize this resume for a Python role",
         )
 
 

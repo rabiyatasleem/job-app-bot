@@ -14,7 +14,7 @@ import random
 import sys
 from pathlib import Path
 
-import google.generativeai as genai
+import google.genai as genai
 from sqlalchemy import func, select
 
 from config import settings
@@ -84,17 +84,16 @@ def _confirm(prompt: str) -> bool:
     return input(f"{prompt} (y/n): ").strip().lower() == "y"
 
 
-def _get_gemini_model() -> genai.GenerativeModel:
-    """Configure and return a Gemini GenerativeModel."""
-    genai.configure(api_key=settings.gemini_api_key)
-    return genai.GenerativeModel(settings.gemini_model)
+def _get_gemini_model() -> genai.Client:
+    """Configure and return a Gemini Client."""
+    return genai.Client(api_key=settings.gemini_api_key)
 
 
-async def _gemini_generate(model: genai.GenerativeModel, prompt: str) -> str:
+async def _gemini_generate(client: genai.Client, prompt: str) -> str:
     """Call Gemini API asynchronously with retry logic.
 
     Args:
-        model: Configured GenerativeModel instance.
+        client: Configured Gemini Client instance.
         prompt: Full prompt text to send.
 
     Returns:
@@ -104,7 +103,9 @@ async def _gemini_generate(model: genai.GenerativeModel, prompt: str) -> str:
     for attempt in range(3):
         try:
             response = await asyncio.to_thread(
-                model.generate_content, prompt
+                client.models.generate_content,
+                model=settings.gemini_model,
+                contents=prompt,
             )
             return response.text
         except Exception as exc:
